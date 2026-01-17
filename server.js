@@ -7,10 +7,28 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ADMIN_USERNAME = 'admin';
-const ADMIN_PASSWORD = 'Hikmah2026!';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Hikmah2026!';
+
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:4173',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:4173',
+  'https://mohammed054.github.io'
+];
+
+if (process.env.FRONTEND_URL) {
+  allowedOrigins.push(process.env.FRONTEND_URL);
+}
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:4173', 'http://127.0.0.1:5173', 'http://127.0.0.1:4173'],
+  origin: function(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true);
+    }
+  },
   credentials: true
 }));
 app.use(express.json());
