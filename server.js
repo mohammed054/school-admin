@@ -10,6 +10,14 @@ const PORT = process.env.PORT || 3001;
 const ADMIN_USERNAME = 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Hikmah2026!';
 
+if (!process.env.MONGODB_URI) {
+  console.error('ERROR: MONGODB_URI environment variable is not set!');
+  console.error('Please add MONGODB_URI to Railway variables');
+  process.exit(1);
+}
+
+console.log('MongoDB URI configured:', process.env.MONGODB_URI.replace(/:([^:@]+)@/, ':****@'));
+
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:4173',
