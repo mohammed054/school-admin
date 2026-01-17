@@ -47,7 +47,11 @@ app.use(session({
   }
 }));
 
-mongoose.connect(process.env.MONGODB_URI)
+mongoose.connect(process.env.MONGODB_URI, {
+  serverSelectionTimeoutMS: 30000,
+  socketTimeoutMS: 45000,
+  maxPoolSize: 10,
+})
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
@@ -65,7 +69,10 @@ const Content = mongoose.model('Content', contentSchema);
 
 app.get('/api/content', async (req, res) => {
   try {
-    const allContent = await Content.find({});
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ error: 'Database unavailable' });
+    }
+    const allContent = await Content.find({}).maxTimeMS(20000).lean();
     const contentMap = {};
     allContent.forEach(item => {
       if (!contentMap[item.section]) contentMap[item.section] = {};
@@ -74,13 +81,16 @@ app.get('/api/content', async (req, res) => {
     res.json(contentMap);
   } catch (error) {
     console.error('Error fetching content:', error);
-    res.status(500).json({ error: 'Failed to fetch content' });
+    res.status(503).json({ error: 'Failed to fetch content' });
   }
 });
 
 app.get('/api/content/:section', async (req, res) => {
   try {
-    const sectionContent = await Content.find({ section: req.params.section });
+    if (mongoose.connection.readyState !== 1) {
+      return res.status(503).json({ error: 'Database unavailable' });
+    }
+    const sectionContent = await Content.find({ section: req.params.section }).maxTimeMS(20000).lean();
     const contentMap = {};
     sectionContent.forEach(item => {
       contentMap[item.field] = item.value;
@@ -88,7 +98,7 @@ app.get('/api/content/:section', async (req, res) => {
     res.json(contentMap);
   } catch (error) {
     console.error('Error fetching content:', error);
-    res.status(500).json({ error: 'Failed to fetch content' });
+    res.status(503).json({ error: 'Failed to fetch content' });
   }
 });
 
