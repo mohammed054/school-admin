@@ -59,8 +59,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
   maxPoolSize: 10,
-  authSource: 'admin',
-  authMechanism: 'SCRAM-SHA-1'
+  authSource: 'admin'
 })
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
