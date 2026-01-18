@@ -237,12 +237,15 @@ app.delete('/api/image/:publicId', async (req, res) => {
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
+  console.log('Login attempt:', username, 'Session ID:', req.sessionID);
   
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
     req.session.isAdmin = true;
     req.session.username = username;
+    console.log('Login successful, session saved');
     res.json({ success: true, message: 'Login successful' });
   } else {
+    console.log('Login failed: invalid credentials');
     res.status(401).json({ success: false, message: 'Invalid credentials' });
   }
 });
