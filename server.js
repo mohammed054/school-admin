@@ -112,6 +112,7 @@ app.get('/api/content/:section', async (req, res) => {
 });
 
 const checkAdminAuth = (req) => {
+  console.log('Auth check - Session:', req.session.isAdmin, 'Auth header:', req.headers.authorization ? 'present' : 'missing');
   if (req.session.isAdmin) return true;
   
   const authHeader = req.headers.authorization;
@@ -126,7 +127,9 @@ const checkAdminAuth = (req) => {
 };
 
 app.put('/api/content/:section/:field', async (req, res) => {
+  console.log('PUT request received:', req.params);
   if (!checkAdminAuth(req)) {
+    console.log('Authentication failed');
     return res.status(401).json({ error: 'Unauthorized' });
   }
   try {
