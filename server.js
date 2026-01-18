@@ -277,5 +277,5 @@ app.get('/api/health', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`School Admin Server running on http://localhost:${PORT}`);
+  console.log(`School Admin Server running on port ${PORT}`);
 });
