@@ -38,8 +38,16 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url} - Session ID: ${req.sessionID}, isAdmin: ${req.session.isAdmin}`);
+  next();
+});
+
 app.use(express.json({ limit: '50mb' }));
 app.use(cookieParser());
 
@@ -51,7 +59,8 @@ app.use(session({
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     maxAge: 24 * 60 * 60 * 1000,
-    sameSite: 'none'
+    sameSite: 'none',
+    domain: process.env.NODE_ENV === 'production' ? undefined : undefined
   }
 }));
 
