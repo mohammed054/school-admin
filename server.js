@@ -5,6 +5,7 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
+// School Admin Server - Updated for maintenance
 const app = express();
 const PORT = process.env.PORT || 3001;
 const ADMIN_USERNAME = 'admin';
