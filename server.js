@@ -59,7 +59,7 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'HikmahAdminSecret2026!',
   resave: false,
   saveUninitialized: false,
-  store: MongoStore.create({
+  store: new MongoStore({
     mongoUrl: process.env.MONGODB_URI,
     collectionName: 'sessions',
     ttl: 24 * 60 * 60
