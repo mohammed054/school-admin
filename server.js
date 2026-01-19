@@ -12,11 +12,6 @@ function generateToken(sessionID) {
   return crypto.createHmac('sha256', TOKEN_SECRET).update(sessionID).digest('hex');
 }
 
-function verifyToken(token, sessionID) {
-  const expected = generateToken(sessionID);
-  return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
-}
-
 // School Admin Server - Updated for maintenance
 const app = express();
 const PORT = process.env.PORT || 3001;
