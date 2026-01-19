@@ -141,15 +141,12 @@ const checkAdminAuth = (req) => {
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7);
     const sessionID = req.headers['x-session-id'];
-    if (sessionID && token) {
-      try {
-        if (verifyToken(token, sessionID)) {
-          req.session.isAdmin = true;
-          req.session.username = 'admin';
-          return true;
-        }
-      } catch (e) {
-        return false;
+    if (sessionID && token && token.length === 64) {
+      const expected = generateToken(sessionID);
+      if (token === expected) {
+        req.session.isAdmin = true;
+        req.session.username = 'admin';
+        return true;
       }
     }
   }
@@ -294,32 +291,25 @@ app.post('/api/logout', (req, res) => {
 app.get('/api/check-auth', (req, res) => {
   if (req.session.isAdmin) {
     res.json({ isAuthenticated: true, username: req.session.username });
-  } else {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.slice(7);
-      const sessionID = req.headers['x-session-id'];
-      if (sessionID && token) {
-        try {
-          if (verifyToken(token, sessionID)) {
-            req.session.isAdmin = true;
-            req.session.username = 'admin';
-            res.json({ isAuthenticated: true, username: 'admin' });
-            return;
-          } catch (e) {
-            res.json({ isAuthenticated: false });
-            return;
-          }
-        } catch (e) {
-          res.json({ isAuthenticated: false });
-          return;
-        }
+    return;
+  }
+  
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.slice(7);
+    const sessionID = req.headers['x-session-id'];
+    if (sessionID && token && token.length === 64) {
+      const expected = generateToken(sessionID);
+      if (token === expected) {
+        req.session.isAdmin = true;
+        req.session.username = 'admin';
+        res.json({ isAuthenticated: true, username: 'admin' });
+        return;
       }
-      res.json({ isAuthenticated: false });
-    } else {
-      res.json({ isAuthenticated: false });
     }
   }
+  
+  res.json({ isAuthenticated: false });
 });
 
 app.get('/api/health', (req, res) => {
