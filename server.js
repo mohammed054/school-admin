@@ -43,11 +43,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url} - Session ID: ${req.sessionID}, isAdmin: ${req.session.isAdmin}`);
-  next();
-});
-
 app.use(express.json({ limit: '50mb' }));
 app.use(cookieParser());
 
@@ -63,6 +58,11 @@ app.use(session({
     domain: process.env.NODE_ENV === 'production' ? undefined : undefined
   }
 }));
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url} - Session ID: ${req.sessionID}, isAdmin: ${req.session ? req.session.isAdmin : 'N/A'}`);
+  next();
+});
 
 mongoose.connect(process.env.MONGODB_URI, {
   serverSelectionTimeoutMS: 30000,
