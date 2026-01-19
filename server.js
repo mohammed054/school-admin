@@ -3,7 +3,19 @@ const session = require('express-session');
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 require('dotenv').config();
+
+const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
+
+function generateToken(sessionID) {
+  return crypto.createHmac('sha256', TOKEN_SECRET).update(sessionID).digest('hex');
+}
+
+function verifyToken(token, sessionID) {
+  const expected = generateToken(sessionID);
+  return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+}
 
 // School Admin Server - Updated for maintenance
 const app = express();
@@ -127,10 +139,18 @@ const checkAdminAuth = (req) => {
   
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    if (authHeader === 'Bearer logged_in') {
-      req.session.isAdmin = true;
-      req.session.username = 'admin';
-      return true;
+    const token = authHeader.slice(7);
+    const sessionID = req.headers['x-session-id'];
+    if (sessionID && token) {
+      try {
+        if (verifyToken(token, sessionID)) {
+          req.session.isAdmin = true;
+          req.session.username = 'admin';
+          return true;
+        }
+      } catch (e) {
+        return false;
+      }
     }
   }
   return false;
@@ -252,8 +272,9 @@ app.post('/api/login', (req, res) => {
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
     req.session.isAdmin = true;
     req.session.username = username;
+    const token = generateToken(req.sessionID);
     console.log('Login successful, session saved');
-    res.json({ success: true, message: 'Login successful' });
+    res.json({ success: true, message: 'Login successful', token, sessionID: req.sessionID });
   } else {
     console.log('Login failed: invalid credentials');
     res.status(401).json({ success: false, message: 'Invalid credentials' });
@@ -276,13 +297,25 @@ app.get('/api/check-auth', (req, res) => {
   } else {
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      if (authHeader === 'Bearer logged_in') {
-        req.session.isAdmin = true;
-        req.session.username = 'admin';
-        res.json({ isAuthenticated: true, username: 'admin' });
-      } else {
-        res.json({ isAuthenticated: false });
+      const token = authHeader.slice(7);
+      const sessionID = req.headers['x-session-id'];
+      if (sessionID && token) {
+        try {
+          if (verifyToken(token, sessionID)) {
+            req.session.isAdmin = true;
+            req.session.username = 'admin';
+            res.json({ isAuthenticated: true, username: 'admin' });
+            return;
+          } catch (e) {
+            res.json({ isAuthenticated: false });
+            return;
+          }
+        } catch (e) {
+          res.json({ isAuthenticated: false });
+          return;
+        }
       }
+      res.json({ isAuthenticated: false });
     } else {
       res.json({ isAuthenticated: false });
     }
