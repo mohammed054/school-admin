@@ -13,6 +13,7 @@ require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const IS_TEST = process.env.NODE_ENV === 'test';
 
 const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -39,7 +40,7 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/svg+xml'
 ]);
 
-if (!process.env.MONGODB_URI) {
+if (!process.env.MONGODB_URI && !IS_TEST) {
   console.error('ERROR: MONGODB_URI environment variable is not set.');
   process.exit(1);
 }
@@ -286,15 +287,10 @@ app.use('/api', applyMutationRateLimit);
 app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 
-app.use(session({
+const sessionOptions = {
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
-  store: new MongoStore({
-    mongoUrl: process.env.MONGODB_URI,
-    collectionName: 'sessions',
-    ttl: 24 * 60 * 60
-  }),
   cookie: {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
@@ -302,16 +298,28 @@ app.use(session({
     sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
     domain: process.env.NODE_ENV === 'production' ? '.up.railway.app' : undefined
   }
-}));
+};
 
-mongoose.connect(process.env.MONGODB_URI, {
-  serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS: 45000,
-  maxPoolSize: 10,
-  authSource: 'admin'
-})
-  .then(() => console.log('Connected to MongoDB'))
-  .catch((err) => console.error('MongoDB connection error:', err));
+if (!IS_TEST) {
+  sessionOptions.store = new MongoStore({
+    mongoUrl: process.env.MONGODB_URI,
+    collectionName: 'sessions',
+    ttl: 24 * 60 * 60
+  });
+}
+
+app.use(session(sessionOptions));
+
+if (!IS_TEST && process.env.MONGODB_URI) {
+  mongoose.connect(process.env.MONGODB_URI, {
+    serverSelectionTimeoutMS: 30000,
+    socketTimeoutMS: 45000,
+    maxPoolSize: 10,
+    authSource: 'admin'
+  })
+    .then(() => console.log('Connected to MongoDB'))
+    .catch((err) => console.error('MongoDB connection error:', err));
+}
 
 const historyEntrySchema = new mongoose.Schema({
   version: { type: Number, required: true },
@@ -867,6 +875,10 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
-  console.log(`School Admin Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`School Admin Server running on port ${PORT}`);
+  });
+}
+
+module.exports = app;
