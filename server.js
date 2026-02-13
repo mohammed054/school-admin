@@ -18,6 +18,11 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toSt
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Hikmah2026!';
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_CONTENT_VALUE_BYTES = 200 * 1024;
+const IDENTIFIER_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+const loginAttempts = new Map();
 
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
@@ -50,6 +55,61 @@ function deepEqual(a, b) {
 
 function parseBool(value) {
   return value === '1' || value === 'true' || value === true;
+}
+
+function isValidIdentifier(value) {
+  return typeof value === 'string' && IDENTIFIER_PATTERN.test(value);
+}
+
+function getSerializedSizeBytes(value) {
+  try {
+    return Buffer.byteLength(JSON.stringify(value ?? ''), 'utf8');
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
+
+function getLoginKey(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.length > 0) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.ip || req.connection?.remoteAddress || 'unknown';
+}
+
+function isLoginRateLimited(key) {
+  const now = Date.now();
+  const record = loginAttempts.get(key);
+  if (!record) {
+    return { limited: false, retryAfterSeconds: 0 };
+  }
+
+  if (now - record.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.delete(key);
+    return { limited: false, retryAfterSeconds: 0 };
+  }
+
+  if (record.count < LOGIN_MAX_ATTEMPTS) {
+    return { limited: false, retryAfterSeconds: 0 };
+  }
+
+  const retryAfterSeconds = Math.ceil((LOGIN_WINDOW_MS - (now - record.windowStart)) / 1000);
+  return { limited: true, retryAfterSeconds: Math.max(retryAfterSeconds, 1) };
+}
+
+function recordLoginFailure(key) {
+  const now = Date.now();
+  const current = loginAttempts.get(key);
+  if (!current || now - current.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.set(key, { count: 1, windowStart: now });
+    return;
+  }
+
+  loginAttempts.set(key, { count: current.count + 1, windowStart: current.windowStart });
+}
+
+function clearLoginFailures(key) {
+  loginAttempts.delete(key);
 }
 
 function buildFieldMeta(item, hasDraftOverride) {
@@ -303,6 +363,10 @@ app.get('/api/content/:section', async (req, res) => {
 app.get('/api/content/history/:section/:field', requireAdmin, async (req, res) => {
   try {
     const { section, field } = req.params;
+    if (!isValidIdentifier(section) || !isValidIdentifier(field)) {
+      return res.status(400).json({ error: 'Invalid section or field identifier' });
+    }
+
     const item = await Content.findOne({ section, field }).lean();
     if (!item) {
       return res.status(404).json({ error: 'Content field not found' });
@@ -325,9 +389,15 @@ app.put('/api/content/:section/:field', requireAdmin, async (req, res) => {
   try {
     const { section, field } = req.params;
     const { value } = req.body;
+    if (!isValidIdentifier(section) || !isValidIdentifier(field)) {
+      return res.status(400).json({ error: 'Invalid section or field identifier' });
+    }
 
     if (value === undefined) {
       return res.status(400).json({ error: 'value is required' });
+    }
+    if (getSerializedSizeBytes(value) > MAX_CONTENT_VALUE_BYTES) {
+      return res.status(413).json({ error: 'Content value is too large' });
     }
 
     let item = await Content.findOne({ section, field });
@@ -372,6 +442,10 @@ app.put('/api/content/:section/:field', requireAdmin, async (req, res) => {
 app.post('/api/content/:section/:field/publish', requireAdmin, async (req, res) => {
   try {
     const { section, field } = req.params;
+    if (!isValidIdentifier(section) || !isValidIdentifier(field)) {
+      return res.status(400).json({ error: 'Invalid section or field identifier' });
+    }
+
     const item = await Content.findOne({ section, field });
 
     if (!item) {
@@ -429,6 +503,54 @@ app.post('/api/content/:section/:field/publish', requireAdmin, async (req, res) 
   } catch (error) {
     console.error('Error publishing content field:', error);
     res.status(500).json({ error: 'Failed to publish content' });
+  }
+});
+
+app.post('/api/content/:section/:field/restore', requireAdmin, async (req, res) => {
+  try {
+    const { section, field } = req.params;
+    if (!isValidIdentifier(section) || !isValidIdentifier(field)) {
+      return res.status(400).json({ error: 'Invalid section or field identifier' });
+    }
+
+    const { version } = req.body || {};
+    if (!Number.isInteger(version) || version < 1) {
+      return res.status(400).json({ error: 'A valid version number is required' });
+    }
+
+    const item = await Content.findOne({ section, field });
+    if (!item) {
+      return res.status(404).json({ error: 'Content field not found' });
+    }
+
+    ensureLegacyMigrationOnDocument(item);
+    const entry = item.history.find((historyItem) => historyItem.version === version);
+    if (!entry) {
+      return res.status(404).json({ error: 'Version not found' });
+    }
+
+    item.draftValue = entry.value;
+    item.hasDraft = !deepEqual(entry.value, item.publishedValue);
+    if (!item.hasDraft) {
+      item.draftValue = undefined;
+    }
+
+    item.lastEditedAt = new Date();
+    item.lastEditedBy = getActor(req);
+    await item.save();
+
+    res.json({
+      success: true,
+      content: {
+        section,
+        field,
+        value: getReadableValue(item.toObject(), true)
+      },
+      meta: buildFieldMeta(item.toObject())
+    });
+  } catch (error) {
+    console.error('Error restoring content version:', error);
+    res.status(500).json({ error: 'Failed to restore content version' });
   }
 });
 
@@ -502,6 +624,12 @@ app.post('/api/content/bulk', requireAdmin, async (req, res) => {
     for (const itemInput of content) {
       if (!itemInput?.section || !itemInput?.field) {
         continue;
+      }
+      if (!isValidIdentifier(itemInput.section) || !isValidIdentifier(itemInput.field)) {
+        return res.status(400).json({ error: `Invalid section or field: ${itemInput.section || ''}/${itemInput.field || ''}` });
+      }
+      if (getSerializedSizeBytes(itemInput.value) > MAX_CONTENT_VALUE_BYTES) {
+        return res.status(413).json({ error: `Content value is too large for ${itemInput.section}/${itemInput.field}` });
       }
 
       let item = await Content.findOne({ section: itemInput.section, field: itemInput.field });
@@ -621,15 +749,25 @@ app.delete('/api/image/:publicId', requireAdmin, async (req, res) => {
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
+  const loginKey = getLoginKey(req);
+  const limiter = isLoginRateLimited(loginKey);
+  if (limiter.limited) {
+    return res.status(429).json({
+      success: false,
+      message: `Too many login attempts. Try again in ${limiter.retryAfterSeconds} seconds.`
+    });
+  }
 
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
     req.session.isAdmin = true;
     req.session.username = username;
+    clearLoginFailures(loginKey);
     const token = generateToken(req.sessionID);
     res.json({ success: true, message: 'Login successful', token, sessionID: req.sessionID });
     return;
   }
 
+  recordLoginFailure(loginKey);
   res.status(401).json({ success: false, message: 'Invalid credentials' });
 });
 
