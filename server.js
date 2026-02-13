@@ -1,31 +1,137 @@
-const express = require('express');
+﻿const express = require('express');
 const session = require('express-session');
 const { default: MongoStore } = require('connect-mongo');
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
+const cloudinary = require('cloudinary').v2;
+const streamifier = require('streamifier');
+const multer = require('multer');
 require('dotenv').config();
 
+const app = express();
+const PORT = process.env.PORT || 3001;
+
 const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Hikmah2026!';
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/svg+xml'
+]);
+
+if (!process.env.MONGODB_URI) {
+  console.error('ERROR: MONGODB_URI environment variable is not set.');
+  process.exit(1);
+}
+
+if (!process.env.SESSION_SECRET) {
+  console.warn('WARN: SESSION_SECRET is not set. A temporary secret is being used for this process.');
+}
+
+if (!process.env.ADMIN_PASSWORD) {
+  console.warn('WARN: ADMIN_PASSWORD is not set. Using fallback password.');
+}
 
 function generateToken(sessionID) {
   return crypto.createHmac('sha256', TOKEN_SECRET).update(sessionID).digest('hex');
 }
 
-// School Admin Server - Updated for maintenance
-const app = express();
-const PORT = process.env.PORT || 3001;
-const ADMIN_USERNAME = 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Hikmah2026!';
-
-if (!process.env.MONGODB_URI) {
-  console.error('ERROR: MONGODB_URI environment variable is not set!');
-  console.error('Please add MONGODB_URI to Railway variables');
-  process.exit(1);
+function deepEqual(a, b) {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
-console.log('MongoDB URI configured:', process.env.MONGODB_URI.replace(/:([^:@]+)@/, ':****@'));
+function parseBool(value) {
+  return value === '1' || value === 'true' || value === true;
+}
+
+function buildFieldMeta(item, hasDraftOverride) {
+  const publishedValue = item.publishedValue !== undefined ? item.publishedValue : item.value;
+  const draftValue = item.draftValue;
+  const hasDraft = typeof hasDraftOverride === 'boolean'
+    ? hasDraftOverride
+    : (typeof item.hasDraft === 'boolean' ? item.hasDraft : (draftValue !== undefined && !deepEqual(draftValue, publishedValue)));
+
+  return {
+    isDraft: hasDraft,
+    version: Number.isInteger(item.version) && item.version > 0 ? item.version : 1,
+    lastModified: item.updatedAt || null,
+    lastPublishedAt: item.lastPublishedAt || null,
+    lastPublishedBy: item.lastPublishedBy || null,
+    lastEditedAt: item.lastEditedAt || null,
+    lastEditedBy: item.lastEditedBy || null
+  };
+}
+
+function getReadableValue(item, includeDraft) {
+  const publishedValue = item.publishedValue !== undefined ? item.publishedValue : item.value;
+  const hasDraft = typeof item.hasDraft === 'boolean'
+    ? item.hasDraft
+    : (item.draftValue !== undefined && !deepEqual(item.draftValue, publishedValue));
+
+  if (includeDraft && hasDraft) {
+    return item.draftValue;
+  }
+
+  return publishedValue;
+}
+
+function ensureLegacyMigrationOnDocument(doc) {
+  let touched = false;
+
+  if (doc.publishedValue === undefined) {
+    doc.publishedValue = doc.value !== undefined ? doc.value : '';
+    touched = true;
+  }
+
+  if (!Number.isInteger(doc.version) || doc.version < 1) {
+    doc.version = 1;
+    touched = true;
+  }
+
+  if (!Array.isArray(doc.history)) {
+    doc.history = [];
+    touched = true;
+  }
+
+  if (doc.history.length === 0) {
+    doc.history.push({
+      version: doc.version,
+      value: doc.publishedValue,
+      publishedAt: doc.lastPublishedAt || doc.updatedAt || new Date(),
+      publishedBy: doc.lastPublishedBy || 'system'
+    });
+    touched = true;
+  }
+
+  return touched;
+}
+
+function mapContentResponse(items, includeDraft, includeMeta) {
+  const contentMap = {};
+  const metaMap = {};
+
+  for (const item of items) {
+    if (!contentMap[item.section]) {
+      contentMap[item.section] = {};
+    }
+
+    contentMap[item.section][item.field] = getReadableValue(item, includeDraft);
+
+    if (includeMeta) {
+      metaMap[`${item.section}_${item.field}`] = buildFieldMeta(item);
+    }
+  }
+
+  return includeMeta ? { content: contentMap, meta: metaMap } : contentMap;
+}
 
 const allowedOrigins = [
   'http://localhost:5173',
@@ -40,12 +146,12 @@ if (process.env.FRONTEND_URL) {
 }
 
 app.use(cors({
-  origin: function(origin, callback) {
+  origin(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true);
-    } else {
-      callback(new Error('Not allowed by CORS'));
+      return;
     }
+    callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -56,7 +162,7 @@ app.use(express.json({ limit: '50mb' }));
 app.use(cookieParser());
 
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'HikmahAdminSecret2026!',
+  secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   store: new MongoStore({
@@ -73,11 +179,6 @@ app.use(session({
   }
 }));
 
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url} - Session ID: ${req.sessionID}, isAdmin: ${req.session ? req.session.isAdmin : 'N/A'}`);
-  next();
-});
-
 mongoose.connect(process.env.MONGODB_URI, {
   serverSelectionTimeoutMS: 30000,
   socketTimeoutMS: 45000,
@@ -85,32 +186,87 @@ mongoose.connect(process.env.MONGODB_URI, {
   authSource: 'admin'
 })
   .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+  .catch((err) => console.error('MongoDB connection error:', err));
+
+const historyEntrySchema = new mongoose.Schema({
+  version: { type: Number, required: true },
+  value: { type: mongoose.Schema.Types.Mixed, required: true },
+  publishedAt: { type: Date, default: Date.now },
+  publishedBy: { type: String, default: 'system' }
+}, { _id: false });
 
 const contentSchema = new mongoose.Schema({
   section: { type: String, required: true, index: true },
   field: { type: String, required: true, index: true },
-  value: { type: String, required: true },
+  publishedValue: { type: mongoose.Schema.Types.Mixed, default: '' },
+  draftValue: { type: mongoose.Schema.Types.Mixed, default: undefined },
+  hasDraft: { type: Boolean, default: false },
+  version: { type: Number, default: 1 },
+  history: { type: [historyEntrySchema], default: [] },
   type: { type: String, default: 'text' },
-  updatedAt: { type: Date, default: Date.now }
+  lastEditedAt: { type: Date, default: null },
+  lastEditedBy: { type: String, default: null },
+  lastPublishedAt: { type: Date, default: null },
+  lastPublishedBy: { type: String, default: null },
+  // Legacy support for older documents
+  value: { type: mongoose.Schema.Types.Mixed, required: false }
+}, {
+  timestamps: true,
+  minimize: false
 });
 
 contentSchema.index({ section: 1, field: 1 }, { unique: true });
 
 const Content = mongoose.model('Content', contentSchema);
 
+const checkAdminAuth = (req) => {
+  if (req.session?.isAdmin) {
+    return true;
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return false;
+  }
+
+  const token = authHeader.slice(7);
+  const sessionID = req.headers['x-session-id'];
+  if (!sessionID || !token || token.length !== 64) {
+    return false;
+  }
+
+  const expected = generateToken(sessionID);
+  if (token !== expected) {
+    return false;
+  }
+
+  req.session.isAdmin = true;
+  req.session.username = ADMIN_USERNAME;
+  return true;
+};
+
+const requireAdmin = (req, res, next) => {
+  if (!checkAdminAuth(req)) {
+    res.status(401).json({ error: 'Unauthorized' });
+    return;
+  }
+  next();
+};
+
+const getActor = (req) => req.session?.username || ADMIN_USERNAME;
+
 app.get('/api/content', async (req, res) => {
   try {
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ error: 'Database unavailable' });
     }
+
+    const includeDraft = req.query.mode === 'draft' && checkAdminAuth(req);
+    const includeMeta = parseBool(req.query.includeMeta) && includeDraft;
     const allContent = await Content.find({}).maxTimeMS(20000).lean();
-    const contentMap = {};
-    allContent.forEach(item => {
-      if (!contentMap[item.section]) contentMap[item.section] = {};
-      contentMap[item.section][item.field] = item.value;
-    });
-    res.json(contentMap);
+
+    const payload = mapContentResponse(allContent, includeDraft, includeMeta);
+    res.json(payload);
   } catch (error) {
     console.error('Error fetching content:', error);
     res.status(503).json({ error: 'Failed to fetch content' });
@@ -122,93 +278,274 @@ app.get('/api/content/:section', async (req, res) => {
     if (mongoose.connection.readyState !== 1) {
       return res.status(503).json({ error: 'Database unavailable' });
     }
-    const sectionContent = await Content.find({ section: req.params.section }).maxTimeMS(20000).lean();
+
+    const includeDraft = req.query.mode === 'draft' && checkAdminAuth(req);
+    const includeMeta = parseBool(req.query.includeMeta) && includeDraft;
+    const sectionItems = await Content.find({ section: req.params.section }).maxTimeMS(20000).lean();
+
     const contentMap = {};
-    sectionContent.forEach(item => {
-      contentMap[item.field] = item.value;
-    });
-    res.json(contentMap);
+    const metaMap = {};
+
+    for (const item of sectionItems) {
+      contentMap[item.field] = getReadableValue(item, includeDraft);
+      if (includeMeta) {
+        metaMap[item.field] = buildFieldMeta(item);
+      }
+    }
+
+    res.json(includeMeta ? { content: contentMap, meta: metaMap } : contentMap);
   } catch (error) {
-    console.error('Error fetching content:', error);
-    res.status(503).json({ error: 'Failed to fetch content' });
+    console.error('Error fetching section content:', error);
+    res.status(503).json({ error: 'Failed to fetch section content' });
   }
 });
 
-const checkAdminAuth = (req) => {
-  console.log('Auth check - Session:', req.session.isAdmin, 'Auth header:', req.headers.authorization ? 'present' : 'missing');
-  if (req.session.isAdmin) return true;
-  
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    const sessionID = req.headers['x-session-id'];
-    if (sessionID && token && token.length === 64) {
-      const expected = generateToken(sessionID);
-      if (token === expected) {
-        req.session.isAdmin = true;
-        req.session.username = 'admin';
-        return true;
-      }
+app.get('/api/content/history/:section/:field', requireAdmin, async (req, res) => {
+  try {
+    const { section, field } = req.params;
+    const item = await Content.findOne({ section, field }).lean();
+    if (!item) {
+      return res.status(404).json({ error: 'Content field not found' });
     }
-  }
-  return false;
-};
 
-app.put('/api/content/:section/:field', async (req, res) => {
-  console.log('PUT request received:', req.params);
-  if (!checkAdminAuth(req)) {
-    console.log('Authentication failed');
-    return res.status(401).json({ error: 'Unauthorized' });
+    const history = Array.isArray(item.history) ? [...item.history].sort((a, b) => b.version - a.version) : [];
+    res.json({
+      section,
+      field,
+      version: Number.isInteger(item.version) ? item.version : 1,
+      history
+    });
+  } catch (error) {
+    console.error('Error fetching content history:', error);
+    res.status(500).json({ error: 'Failed to fetch content history' });
   }
+});
+
+app.put('/api/content/:section/:field', requireAdmin, async (req, res) => {
   try {
     const { section, field } = req.params;
     const { value } = req.body;
-    
-    if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ error: 'Database unavailable' });
+
+    if (value === undefined) {
+      return res.status(400).json({ error: 'value is required' });
     }
-    
-    const updated = await Content.findOneAndUpdate(
-      { section, field },
-      { section, field, value, updatedAt: new Date() },
-      { upsert: true, new: true }
-    );
-    
-    res.json({ success: true, content: updated });
+
+    let item = await Content.findOne({ section, field });
+    if (!item) {
+      item = new Content({
+        section,
+        field,
+        publishedValue: '',
+        version: 1,
+        history: []
+      });
+    }
+
+    ensureLegacyMigrationOnDocument(item);
+
+    item.draftValue = value;
+    item.hasDraft = !deepEqual(value, item.publishedValue);
+    if (!item.hasDraft) {
+      item.draftValue = undefined;
+    }
+
+    item.lastEditedAt = new Date();
+    item.lastEditedBy = getActor(req);
+
+    await item.save();
+
+    res.json({
+      success: true,
+      content: {
+        section,
+        field,
+        value: getReadableValue(item.toObject(), true)
+      },
+      meta: buildFieldMeta(item.toObject())
+    });
   } catch (error) {
-    console.error('Error updating content:', error);
+    console.error('Error updating content draft:', error);
     res.status(500).json({ error: 'Failed to update content' });
   }
 });
 
-app.post('/api/content/bulk', async (req, res) => {
-  if (!checkAdminAuth(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
+app.post('/api/content/:section/:field/publish', requireAdmin, async (req, res) => {
   try {
-    if (mongoose.connection.readyState !== 1) {
-      return res.status(503).json({ error: 'Database unavailable' });
+    const { section, field } = req.params;
+    const item = await Content.findOne({ section, field });
+
+    if (!item) {
+      return res.status(404).json({ error: 'Content field not found' });
     }
-    const { content } = req.body;
-    const bulkOps = content.map(item => ({
-      updateOne: {
-        filter: { section: item.section, field: item.field },
-        update: { $set: { ...item, updatedAt: new Date() } },
-        upsert: true
-      }
-    }));
-    
-    await Content.bulkWrite(bulkOps);
-    res.json({ success: true });
+
+    ensureLegacyMigrationOnDocument(item);
+
+    if (!item.hasDraft) {
+      return res.json({
+        success: true,
+        alreadyPublished: true,
+        content: {
+          section,
+          field,
+          value: item.publishedValue
+        },
+        meta: buildFieldMeta(item.toObject(), false)
+      });
+    }
+
+    const actor = getActor(req);
+    const publishedAt = new Date();
+    const nextVersion = (item.version || 1) + 1;
+
+    item.publishedValue = item.draftValue;
+    item.draftValue = undefined;
+    item.hasDraft = false;
+    item.version = nextVersion;
+    item.lastPublishedAt = publishedAt;
+    item.lastPublishedBy = actor;
+
+    item.history.push({
+      version: nextVersion,
+      value: item.publishedValue,
+      publishedAt,
+      publishedBy: actor
+    });
+
+    if (item.history.length > 50) {
+      item.history = item.history.slice(item.history.length - 50);
+    }
+
+    await item.save();
+
+    res.json({
+      success: true,
+      content: {
+        section,
+        field,
+        value: item.publishedValue
+      },
+      meta: buildFieldMeta(item.toObject(), false)
+    });
   } catch (error) {
-    console.error('Error bulk inserting content:', error);
-    res.status(500).json({ error: 'Failed to bulk insert content' });
+    console.error('Error publishing content field:', error);
+    res.status(500).json({ error: 'Failed to publish content' });
   }
 });
 
-const cloudinary = require('cloudinary').v2;
-const streamifier = require('streamifier');
-const multer = require('multer');
+app.post('/api/content/publish-all', requireAdmin, async (req, res) => {
+  try {
+    const actor = getActor(req);
+    const items = await Content.find({ hasDraft: true });
+
+    if (!items.length) {
+      return res.json({ success: true, publishedCount: 0, publishedContent: {}, meta: {} });
+    }
+
+    const publishedContent = {};
+    const meta = {};
+
+    for (const item of items) {
+      ensureLegacyMigrationOnDocument(item);
+
+      const publishedAt = new Date();
+      const nextVersion = (item.version || 1) + 1;
+
+      item.publishedValue = item.draftValue;
+      item.draftValue = undefined;
+      item.hasDraft = false;
+      item.version = nextVersion;
+      item.lastPublishedAt = publishedAt;
+      item.lastPublishedBy = actor;
+
+      item.history.push({
+        version: nextVersion,
+        value: item.publishedValue,
+        publishedAt,
+        publishedBy: actor
+      });
+
+      if (item.history.length > 50) {
+        item.history = item.history.slice(item.history.length - 50);
+      }
+
+      await item.save();
+
+      if (!publishedContent[item.section]) {
+        publishedContent[item.section] = {};
+      }
+
+      publishedContent[item.section][item.field] = item.publishedValue;
+      meta[`${item.section}_${item.field}`] = buildFieldMeta(item.toObject(), false);
+    }
+
+    res.json({
+      success: true,
+      publishedCount: items.length,
+      publishedContent,
+      meta
+    });
+  } catch (error) {
+    console.error('Error publishing all drafts:', error);
+    res.status(500).json({ error: 'Failed to publish all drafts' });
+  }
+});
+
+app.post('/api/content/bulk', requireAdmin, async (req, res) => {
+  try {
+    const { content } = req.body;
+    if (!Array.isArray(content)) {
+      return res.status(400).json({ error: 'content must be an array' });
+    }
+
+    const actor = getActor(req);
+
+    for (const itemInput of content) {
+      if (!itemInput?.section || !itemInput?.field) {
+        continue;
+      }
+
+      let item = await Content.findOne({ section: itemInput.section, field: itemInput.field });
+      if (!item) {
+        item = new Content({ section: itemInput.section, field: itemInput.field, version: 1, history: [] });
+      }
+
+      ensureLegacyMigrationOnDocument(item);
+
+      const nextValue = itemInput.value;
+      const changed = !deepEqual(nextValue, item.publishedValue);
+
+      if (changed) {
+        item.version = (item.version || 1) + 1;
+        item.history.push({
+          version: item.version,
+          value: nextValue,
+          publishedAt: new Date(),
+          publishedBy: actor
+        });
+      }
+
+      item.publishedValue = nextValue;
+      item.draftValue = undefined;
+      item.hasDraft = false;
+      item.type = itemInput.type || item.type || 'text';
+      item.lastEditedAt = new Date();
+      item.lastEditedBy = actor;
+      item.lastPublishedAt = new Date();
+      item.lastPublishedBy = actor;
+
+      if (item.history.length > 50) {
+        item.history = item.history.slice(item.history.length - 50);
+      }
+
+      await item.save();
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error in bulk content upsert:', error);
+    res.status(500).json({ error: 'Failed to bulk upsert content' });
+  }
+});
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -216,100 +553,103 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-const upload = multer({ storage: multer.memoryStorage() });
-
-app.post('/api/upload', upload.single('image'), async (req, res) => {
-  if (!checkAdminAuth(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: MAX_IMAGE_SIZE_BYTES
+  },
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_IMAGE_MIME_TYPES.has(file.mimetype)) {
+      cb(new Error('INVALID_FILE_TYPE'));
+      return;
     }
-
-    const uploadFromBuffer = (req) => {
-      return new Promise((resolve, reject) => {
-        let cld_upload_stream = cloudinary.uploader.upload_stream(
-          { folder: 'school-web', resource_type: 'auto' },
-          (error, result) => {
-            if (result) resolve(result);
-            else reject(error);
-          }
-        );
-        streamifier.createReadStream(req.file.buffer).pipe(cld_upload_stream);
-      });
-    };
-
-    const result = await uploadFromBuffer(req);
-    res.json({ url: result.secure_url, publicId: result.public_id });
-  } catch (error) {
-    console.error('Upload error:', error);
-    res.status(500).json({ error: 'Failed to upload image' });
+    cb(null, true);
   }
 });
 
-app.delete('/api/image/:publicId', async (req, res) => {
-  if (!checkAdminAuth(req)) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  
+app.post('/api/upload', requireAdmin, (req, res) => {
+  upload.single('image')(req, res, async (error) => {
+    if (error) {
+      if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'Image is too large. Max allowed size is 5MB.' });
+      }
+      if (error.message === 'INVALID_FILE_TYPE') {
+        return res.status(400).json({ error: 'Unsupported file type. Allowed: JPG, PNG, WEBP, GIF, SVG.' });
+      }
+      return res.status(400).json({ error: 'Upload failed validation.' });
+    }
+
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      const result = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: 'school-web',
+            resource_type: 'image'
+          },
+          (streamError, streamResult) => {
+            if (streamResult) {
+              resolve(streamResult);
+            } else {
+              reject(streamError);
+            }
+          }
+        );
+        streamifier.createReadStream(req.file.buffer).pipe(uploadStream);
+      });
+
+      res.json({ url: result.secure_url, publicId: result.public_id });
+    } catch (uploadError) {
+      console.error('Upload error:', uploadError);
+      res.status(500).json({ error: 'Failed to upload image' });
+    }
+  });
+});
+
+app.delete('/api/image/:publicId', requireAdmin, async (req, res) => {
   try {
     await cloudinary.uploader.destroy(req.params.publicId);
     res.json({ success: true });
   } catch (error) {
-    console.error('Delete error:', error);
+    console.error('Delete image error:', error);
     res.status(500).json({ error: 'Failed to delete image' });
   }
 });
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
-  console.log('Login attempt:', username, 'Session ID:', req.sessionID);
-  
+
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
     req.session.isAdmin = true;
     req.session.username = username;
     const token = generateToken(req.sessionID);
-    console.log('Login successful, session saved');
     res.json({ success: true, message: 'Login successful', token, sessionID: req.sessionID });
-  } else {
-    console.log('Login failed: invalid credentials');
-    res.status(401).json({ success: false, message: 'Invalid credentials' });
+    return;
   }
+
+  res.status(401).json({ success: false, message: 'Invalid credentials' });
 });
 
 app.post('/api/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
+  req.session.destroy((error) => {
+    if (error) {
       return res.status(500).json({ success: false, message: 'Logout failed' });
     }
+
     res.clearCookie('connect.sid');
     res.json({ success: true, message: 'Logout successful' });
   });
 });
 
 app.get('/api/check-auth', (req, res) => {
-  if (req.session.isAdmin) {
-    res.json({ isAuthenticated: true, username: req.session.username });
+  if (checkAdminAuth(req)) {
+    res.json({ isAuthenticated: true, username: req.session.username || ADMIN_USERNAME });
     return;
   }
-  
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.slice(7);
-    const sessionID = req.headers['x-session-id'];
-    if (sessionID && token && token.length === 64) {
-      const expected = generateToken(sessionID);
-      if (token === expected) {
-        req.session.isAdmin = true;
-        req.session.username = 'admin';
-        res.json({ isAuthenticated: true, username: 'admin' });
-        return;
-      }
-    }
-  }
-  
+
   res.json({ isAuthenticated: false });
 });
 

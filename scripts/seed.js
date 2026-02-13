@@ -226,9 +226,23 @@ async function seed() {
     const Content = mongoose.model('Content', new mongoose.Schema({
       section: { type: String, required: true, index: true },
       field: { type: String, required: true, index: true },
-      value: { type: String, required: true },
+      publishedValue: { type: mongoose.Schema.Types.Mixed, default: '' },
+      draftValue: { type: mongoose.Schema.Types.Mixed, default: undefined },
+      hasDraft: { type: Boolean, default: false },
+      version: { type: Number, default: 1 },
+      history: [{
+        version: { type: Number, required: true },
+        value: { type: mongoose.Schema.Types.Mixed, required: true },
+        publishedAt: { type: Date, default: Date.now },
+        publishedBy: { type: String, default: 'seed-script' }
+      }],
       type: { type: String, default: 'text' },
-      updatedAt: { type: Date, default: Date.now }
+      lastEditedAt: { type: Date, default: null },
+      lastEditedBy: { type: String, default: null },
+      lastPublishedAt: { type: Date, default: null },
+      lastPublishedBy: { type: String, default: null }
+    }, {
+      timestamps: true
     }));
 
     await Content.deleteMany({});
@@ -239,7 +253,28 @@ async function seed() {
         bulkOps.push({
           updateOne: {
             filter: { section, field },
-            update: { $set: { section, field, value, type: 'text', updatedAt: new Date() } },
+            update: {
+              $set: {
+                section,
+                field,
+                publishedValue: value,
+                draftValue: undefined,
+                hasDraft: false,
+                version: 1,
+                history: [{
+                  version: 1,
+                  value,
+                  publishedAt: new Date(),
+                  publishedBy: 'seed-script'
+                }],
+                type: 'text',
+                lastEditedAt: new Date(),
+                lastEditedBy: 'seed-script',
+                lastPublishedAt: new Date(),
+                lastPublishedBy: 'seed-script',
+                updatedAt: new Date()
+              }
+            },
             upsert: true
           }
         });
