@@ -3,6 +3,7 @@ const session = require('express-session');
 const { default: MongoStore } = require('connect-mongo');
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
+const helmet = require('helmet');
 const mongoose = require('mongoose');
 const crypto = require('crypto');
 const cloudinary = require('cloudinary').v2;
@@ -23,6 +24,12 @@ const IDENTIFIER_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 10;
 const loginAttempts = new Map();
+const API_RATE_WINDOW_MS = 5 * 60 * 1000;
+const API_RATE_MAX_REQUESTS = 300;
+const MUTATION_RATE_WINDOW_MS = 15 * 60 * 1000;
+const MUTATION_RATE_MAX_REQUESTS = 120;
+const apiRequestBuckets = new Map();
+const mutationRequestBuckets = new Map();
 
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
@@ -110,6 +117,55 @@ function recordLoginFailure(key) {
 
 function clearLoginFailures(key) {
   loginAttempts.delete(key);
+}
+
+function createRateLimiter(bucket, windowMs, maxRequests, scopeLabel) {
+  return (req, res, next) => {
+    if (req.method === 'OPTIONS' || req.path === '/health') {
+      next();
+      return;
+    }
+
+    const now = Date.now();
+    const key = getLoginKey(req);
+    const record = bucket.get(key);
+
+    if (!record || now - record.windowStart > windowMs) {
+      bucket.set(key, { count: 1, windowStart: now });
+      next();
+      return;
+    }
+
+    if (record.count >= maxRequests) {
+      const retryAfterSeconds = Math.ceil((windowMs - (now - record.windowStart)) / 1000);
+      const waitSeconds = Math.max(retryAfterSeconds, 1);
+      res.setHeader('Retry-After', String(waitSeconds));
+      res.status(429).json({
+        error: `Too many ${scopeLabel} requests. Try again in ${waitSeconds} seconds.`
+      });
+      return;
+    }
+
+    bucket.set(key, { count: record.count + 1, windowStart: record.windowStart });
+    next();
+  };
+}
+
+const apiRateLimiter = createRateLimiter(apiRequestBuckets, API_RATE_WINDOW_MS, API_RATE_MAX_REQUESTS, 'API');
+const mutationRateLimiter = createRateLimiter(
+  mutationRequestBuckets,
+  MUTATION_RATE_WINDOW_MS,
+  MUTATION_RATE_MAX_REQUESTS,
+  'write'
+);
+
+function applyMutationRateLimit(req, res, next) {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE') {
+    mutationRateLimiter(req, res, next);
+    return;
+  }
+
+  next();
 }
 
 function buildFieldMeta(item, hasDraftOverride) {
@@ -205,6 +261,9 @@ if (process.env.FRONTEND_URL) {
   allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
 app.use(cors({
   origin(origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -218,7 +277,13 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Session-ID']
 }));
 
-app.use(express.json({ limit: '50mb' }));
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+app.use('/api', apiRateLimiter);
+app.use('/api', applyMutationRateLimit);
+app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 
 app.use(session({
@@ -615,8 +680,8 @@ app.post('/api/content/publish-all', requireAdmin, async (req, res) => {
 app.post('/api/content/bulk', requireAdmin, async (req, res) => {
   try {
     const { content } = req.body;
-    if (!Array.isArray(content)) {
-      return res.status(400).json({ error: 'content must be an array' });
+    if (!Array.isArray(content) || content.length === 0 || content.length > 100) {
+      return res.status(400).json({ error: 'content must be a non-empty array with up to 100 items' });
     }
 
     const actor = getActor(req);
@@ -748,7 +813,14 @@ app.delete('/api/image/:publicId', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
+  const { username, password } = req.body || {};
+  if (typeof username !== 'string' || typeof password !== 'string') {
+    return res.status(400).json({ success: false, message: 'Username and password are required.' });
+  }
+  if (username.length > 120 || password.length > 200) {
+    return res.status(400).json({ success: false, message: 'Invalid credentials format.' });
+  }
+
   const loginKey = getLoginKey(req);
   const limiter = isLoginRateLimited(loginKey);
   if (limiter.limited) {
