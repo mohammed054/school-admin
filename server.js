@@ -14,11 +14,12 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 const IS_TEST = process.env.NODE_ENV === 'test';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
-const TOKEN_SECRET = process.env.TOKEN_SECRET || crypto.randomBytes(32).toString('hex');
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const TOKEN_SECRET = process.env.TOKEN_SECRET || (IS_TEST ? 'test-token-secret' : crypto.randomBytes(32).toString('hex'));
+const SESSION_SECRET = process.env.SESSION_SECRET || (IS_TEST ? 'test-session-secret' : crypto.randomBytes(32).toString('hex'));
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'Hikmah2026!';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (IS_TEST ? 'test-admin-password' : '');
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_CONTENT_VALUE_BYTES = 200 * 1024;
 const IDENTIFIER_PATTERN = /^[a-zA-Z0-9_-]{1,80}$/;
@@ -45,12 +46,19 @@ if (!process.env.MONGODB_URI && !IS_TEST) {
   process.exit(1);
 }
 
-if (!process.env.SESSION_SECRET) {
-  console.warn('WARN: SESSION_SECRET is not set. A temporary secret is being used for this process.');
+if (IS_PRODUCTION && !process.env.SESSION_SECRET) {
+  console.error('ERROR: SESSION_SECRET is required in production.');
+  process.exit(1);
 }
 
-if (!process.env.ADMIN_PASSWORD) {
-  console.warn('WARN: ADMIN_PASSWORD is not set. Using fallback password.');
+if (IS_PRODUCTION && !process.env.TOKEN_SECRET) {
+  console.error('ERROR: TOKEN_SECRET is required in production.');
+  process.exit(1);
+}
+
+if (!ADMIN_PASSWORD && !IS_TEST) {
+  console.error('ERROR: ADMIN_PASSWORD environment variable is required.');
+  process.exit(1);
 }
 
 function generateToken(sessionID) {
